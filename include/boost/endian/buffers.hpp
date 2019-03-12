@@ -43,6 +43,7 @@
 #include <boost/type_traits/conditional.hpp>
 #include <boost/type_traits/is_integral.hpp>
 #include <boost/type_traits/type_identity.hpp>
+#include <boost/integer.hpp>
 #include <boost/cstdint.hpp>
 #include <boost/static_assert.hpp>
 #include <boost/core/scoped_enum.hpp>
@@ -219,14 +220,29 @@ namespace endian
 
   namespace detail
   {
+    enum type_classification {
+      is_signed = 1 << 0, is_integral = 1 << 1,
+
+      uint  = (true  * is_integral) | (false * is_signed),
+      sint  = (true  * is_integral) | (true  * is_signed),
+      other = (false * is_integral) | (false * is_signed),
+    };
+
+    template <typename T>
+    struct classify_type
+    {
+      static type_classification const value = static_cast<type_classification>(
+          (boost::is_integral<T>::value * is_integral) |
+          (boost::is_signed<T>::value * is_signed));
+    };
 
     // Unrolled loops for loading and storing streams of bytes.
 
     template <typename T, std::size_t n_bytes,
-      bool sign=boost::is_signed<T>::value >
+      type_classification tclass = classify_type<T>::value>
     struct unrolled_byte_loops
     {
-      typedef unrolled_byte_loops<T, n_bytes - 1, sign> next;
+      typedef unrolled_byte_loops<T, n_bytes - 1, tclass> next;
 
       // shifting a negative number is flagged by -fsanitize=undefined
       // so use the corresponding unsigned type for the shifts
@@ -252,8 +268,41 @@ namespace endian
         }
     };
 
+    template <typename T, std::size_t n_bytes>
+    struct unrolled_byte_loops<T, n_bytes, other>
+    {
+      typedef typename boost::uint_t<sizeof(T) * 8>::exact tmp_type;
+
+      static T load_big(const unsigned char* bytes) BOOST_NOEXCEPT
+        {
+          tmp_type tmp = unrolled_byte_loops<tmp_type, n_bytes>::load_big(bytes);
+          T result;
+          std::memcpy(&result, &tmp, sizeof(result));
+          return result;
+        }
+      static T load_little(const unsigned char* bytes) BOOST_NOEXCEPT
+        {
+          tmp_type tmp = unrolled_byte_loops<tmp_type, n_bytes>::load_little(bytes);
+          T result;
+          std::memcpy(&result, &tmp, sizeof(result));
+          return result;
+        }
+      static void store_big(unsigned char* bytes, T value) BOOST_NOEXCEPT
+        {
+          tmp_type tmp;
+          std::memcpy(&tmp, &value, sizeof(tmp));
+          unrolled_byte_loops<tmp_type, n_bytes>::store_big(bytes, tmp);
+        }
+      static void store_little(unsigned char* bytes, T value) BOOST_NOEXCEPT
+        {
+          tmp_type tmp;
+          std::memcpy(&tmp, &value, sizeof(tmp));
+          unrolled_byte_loops<tmp_type, n_bytes>::store_little(bytes, tmp);
+        }
+    };
+
     template <typename T>
-    struct unrolled_byte_loops<T, 1, false>
+    struct unrolled_byte_loops<T, 1, uint>
     {
       static T load_big(const unsigned char* bytes) BOOST_NOEXCEPT
         { return *(bytes - 1); }
@@ -267,7 +316,7 @@ namespace endian
     };
 
     template <typename T>
-    struct unrolled_byte_loops<T, 1, true>
+    struct unrolled_byte_loops<T, 1, sint>
     {
       static T load_big(const unsigned char* bytes) BOOST_NOEXCEPT
         { return *reinterpret_cast<const signed char*>(bytes - 1); }
@@ -279,6 +328,29 @@ namespace endian
         { *bytes = static_cast<unsigned char>(value); }
     };
 
+    template <typename T>
+    inline
+    T unaligned_load_big_endian(const void* bytes, boost::true_type /*is_integral*/) BOOST_NOEXCEPT
+    {
+        T t = 0;
+        std::memcpy( &t, bytes, sizeof(T) );
+        return big_to_native(t);
+    }
+
+    template <typename T>
+    inline
+    T unaligned_load_big_endian(const void* bytes, boost::false_type /*is_integral*/) BOOST_NOEXCEPT
+    {
+        typename boost::uint_t<sizeof(T) * 8>::exact tmp;
+        std::memcpy( &tmp, bytes, sizeof(T) );
+        tmp = big_to_native(tmp);
+
+        T value;
+        std::memcpy( &value, &tmp, sizeof(T) );
+
+        return value;
+    }
+
     template <typename T, std::size_t n_bytes>
     inline
     T load_big_endian(const void* bytes) BOOST_NOEXCEPT
@@ -287,11 +359,7 @@ namespace endian
       // All major x86 compilers elide this test and optimize out memcpy
       // (the x86 architecture allows unaligned loads, but -fsanitize=undefined does not)
       if (sizeof(T) == n_bytes)
-      {
-        T t;
-        std::memcpy( &t, bytes, sizeof(T) );
-        return endian::big_to_native(t);
-      }
+        return unaligned_load_big_endian<T>(bytes, boost::is_integral<T>());
 #   endif
       return unrolled_byte_loops<T, n_bytes>::load_big
         (static_cast<const unsigned char*>(bytes) + n_bytes);
@@ -315,6 +383,25 @@ namespace endian
         (static_cast<const unsigned char*>(bytes));
     }
 
+    template <typename T>
+    inline
+    void unaligned_store_big_endian(void* bytes, T value, boost::true_type /*is_integral*/) BOOST_NOEXCEPT
+    {
+        boost::endian::native_to_big_inplace(value);
+        std::memcpy( bytes, &value, sizeof(T) );
+    }
+
+    template <typename T>
+    inline
+    void unaligned_store_big_endian(void* bytes, T value, boost::false_type /*is_integral*/) BOOST_NOEXCEPT
+    {
+        typename boost::uint_t<sizeof(T) * 8>::exact tmp;
+        std::memcpy( &tmp, &value, sizeof(T) );
+
+        boost::endian::native_to_big_inplace(tmp);
+        std::memcpy( bytes, &tmp, sizeof(T) );
+    }
+
     template <typename T, std::size_t n_bytes>
     inline
     void store_big_endian(void* bytes, T value) BOOST_NOEXCEPT
@@ -323,11 +410,7 @@ namespace endian
       // All major x86 compilers elide this test and optimize out memcpy
       // (the x86 architecture allows unaligned loads, but -fsanitize=undefined does not)
       if (sizeof(T) == n_bytes)
-      {
-        endian::native_to_big_inplace(value);
-        std::memcpy( bytes, &value, sizeof(T) );
-        return;
-      }
+        return unaligned_store_big_endian<T>(bytes, value, boost::is_integral<T>());
 #     endif
       unrolled_byte_loops<T, n_bytes>::store_big
         (static_cast<unsigned char*>(bytes) + n_bytes, value);
