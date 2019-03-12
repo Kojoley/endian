@@ -220,6 +220,15 @@ namespace
     test_buffer_type< endian_buffer<order::big, Int, sizeof(Int) * CHAR_BIT, align::yes> >( std::numeric_limits<Int>::min(), std::numeric_limits<Int>::max() );
   }
 
+  template <typename T>
+  void test_boundary_values_non_integer()
+  {
+    BOOST_STATIC_ASSERT(std::numeric_limits<T>::is_bounded);
+    test_buffer_type< endian_buffer<order::big, T, sizeof(T) * CHAR_BIT, align::no> >( std::numeric_limits<T>::min(), std::numeric_limits<T>::max() );
+    test_buffer_type< endian_buffer<order::big, T, sizeof(T) * CHAR_BIT, align::no> >( std::numeric_limits<T>::min(), std::numeric_limits<T>::max() );
+    // TODO: aligned types are not supported for non-integer types currently
+  }
+
   void test_boundary_values()
   {
     std::cout << "test boundary values..." << std::endl;
@@ -230,6 +239,9 @@ namespace
     test_boundary_values_<unsigned short>();
     test_boundary_values_<signed char>();
     test_boundary_values_<unsigned char>();
+    test_boundary_values_non_integer<float>();
+    test_boundary_values_non_integer<double>();
+    //test_boundary_values_non_integer<long double>();
 
     std::cout << "test boundary values complete" << std::endl;
   }
